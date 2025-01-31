@@ -18,6 +18,12 @@ BLACK = (0, 0, 0)
 STC_COLOR = (255, 255, 0)
 RTC_COLOR = (255, 0, 0)
 
+OXYGEN_DIFFUSION_RATE = 0.1  # D in diffusion equation
+OXYGEN_CONSUMPTION_RATE = 0.05  # γ in consumption term
+OXYGEN_SOURCE = 0.2  # Background oxygen level
+BLOOD_VESSEL_RADIUS = 3  # Radius of central blood vessel
+HYPOXIC_THRESHOLD = 0.15  # Oxygen level for hypoxia effects
+
 # Simulation Parameters
 running = False
 days_elapsed = 0
@@ -98,6 +104,25 @@ def draw_grid():
                 color = (intensity, 0, 0)  # Shades of red
             pygame.draw.rect(screen, color, (col * cell_width, row * cell_height, cell_width, cell_height))
 
+    alpha_surface = pygame.Surface((screen_width, screen_height), pygame.SRCALPHA)
+    rows, cols = oxygen.shape
+    cell_w = screen_width // cols
+    cell_h = screen_height // rows
+
+    alpha_surface = pygame.Surface((screen_width, screen_height), pygame.SRCALPHA)
+    rows, cols = oxygen.shape
+    cell_w = screen_width // cols
+    cell_h = screen_height // rows
+    
+    for row in range(rows):
+        for col in range(cols):
+            oxy = oxygen[row,col]
+            alpha = int(oxy * 100)
+            pygame.draw.rect(alpha_surface, (0, 0, 255, alpha), 
+                            (col*cell_w, row*cell_h, cell_w, cell_h))
+    
+    screen.blit(alpha_surface, (0,0))
+
     # # Draw grid lines
     # for x in range(0, screen_width, cell_width):
     #     pygame.draw.line(screen, BLACK, (x, 0), (x, screen_height))
@@ -129,11 +154,11 @@ def reset_grid():
     population_dynamics = {"total": [], "stem": [], "regular": []}
 
 def create_tumor(param_stem):
-    """ From given param_stem creates and returns the tumor matrix, its size and its center""" 
-    tumor_n = 11 #Size of the initial tumor system:  squared ODD matrix 
-    tumor_center = tumor_n//2 #Center of the matrix / initial tumor cell
-    tumor = np.zeros((tumor_n,tumor_n),dtype=np.int64) # Create a matrix of empty spaces (zeros)
-    tumor[tumor_center][tumor_center] = param_stem #param_stem # Puts a stem tumor cell in the middle of the matrix
+    """From given param_stem creates and returns the tumor matrix""" 
+    tumor_n = INITIAL_SIZE  # Use INITIAL_SIZE instead of hardcoded 11
+    tumor_center = tumor_n // 2
+    tumor = np.zeros((tumor_n, tumor_n), dtype=np.int64)
+    tumor[tumor_center][tumor_center] = param_stem
     return tumor, tumor_n, tumor_center
 def order_sweep(tumor_backup):
     """ Returns a random sweeping order to accesss cord (rows, columns) for tumor_backup matrix"""
@@ -167,56 +192,48 @@ def calc_free_spots(A, i, j):
     return neighbors_fail
 
 
-def calc_rad(i, j, radius, nc):
-    """Optimized radius calculation using Numba"""
-    dist = np.sqrt((nc-i)**2 + (nc-j)**2)
-
-    return max(dist, radius)
+def calc_rad(i, j, radius):
+    """Calculate maximum distance from original center"""
+    global original_center  # This should be defined in your initialization
+    dx = i - original_center[0]
+    dy = j - original_center[1]
+    return max(np.sqrt(dx**2 + dy**2), radius)
 
 # Replace original functions with optimized versions
-def main_ca(tumor, tumor_rad_new):
-    # Pre-compute random numbers for better performance
+def main_ca(tumor, tumor_rad_new, oxygen):
     cord, order = order_sweep(tumor)
     tumor_death, tumor_prolif, tumor_migr = calc_chance(cord, order)
-    
-    # Create local variables to avoid dictionary lookups
-    param_stem_local = param_stem
-    chance_death_local = chance_death
-    chance_proliferation_local = chance_proliferation
-    chance_migration_local = chance_migration
-    chance_stem_local = chance_stem
-    P_MAX_local = P_MAX
-    tumor_center_local = tumor_center
-    
-    # Pre-allocate lists for free spots calculation
-    spots_cache = [0, 0, 0]
     
     for n in order:
         i, j = cord[n]
         cell_value = tumor[i][j]
+        current_oxygen = oxygen[i,j]
         
-        # Early exit if cell is dead
-        if cell_value == 0:
-            continue
-            
+        # Modify probabilities based on oxygen level
+        oxygen_factor = current_oxygen / HYPOXIC_THRESHOLD
+        hypoxia_factor = max(0, 1 - oxygen_factor)
+        
+        # Adjusted probabilities
+        adj_death = chance_death * (1 + 2*hypoxia_factor)
+        adj_proliferation = chance_proliferation * min(1, oxygen_factor)
+        adj_migration = chance_migration * (1 + hypoxia_factor)
+        
         # Death check
-        if cell_value < param_stem_local and tumor_death[n] <= chance_death_local:
+        if cell_value < param_stem and tumor_death[n] <= adj_death:
             tumor[i][j] = 0
             continue
             
-        # Combine proliferation and migration check
-        if tumor_prolif[n] <= chance_proliferation_local or tumor_migr[n] <= chance_migration_local:
-            # Reuse spots array to avoid memory allocation
-            spots_cache = calc_free_spots(tumor,i,j) 
-            
+        # Proliferation and migration
+        if tumor_prolif[n] <= adj_proliferation or tumor_migr[n] <= adj_migration:
+            spots_cache = calc_free_spots(tumor, i, j)
             if spots_cache[0] == 0:  # Free adjacent spots exist
                 new_i = i + spots_cache[1]
                 new_j = j + spots_cache[2]
                 
-                if tumor_prolif[n] <= chance_proliferation_local:
+                if tumor_prolif[n] <= adj_proliferation:
                     # Proliferation case
-                    if cell_value == param_stem_local:
-                        tumor[new_i][new_j] = param_stem_local if random.random() <= chance_stem_local else P_MAX_local
+                    if cell_value == param_stem:
+                        tumor[new_i][new_j] = param_stem if random.random() <= chance_stem else P_MAX
                     else:
                         tumor[i][j] -= 1
                         tumor[new_i][new_j] = tumor[i][j]
@@ -224,11 +241,14 @@ def main_ca(tumor, tumor_rad_new):
                     # Migration case
                     tumor[new_i][new_j] = cell_value
                     tumor[i][j] = 0
+
+                # Update oxygen level after proliferation/migration
+                oxygen[i,j] = max(0, oxygen[i,j] - 0.1)
                 
-                # Update radius only once per iteration
-                tumor_rad_new = calc_rad(new_i, new_j, tumor_rad_new, tumor_center_local)
+                # Update radius
+                tumor_rad_new = calc_rad(new_i, new_j, tumor_rad_new)
     
-    return tumor, tumor_rad_new
+    return tumor, tumor_rad_new, oxygen
 
 def calc_pop(tumor_snap, param_stem):
     """Population calculation"""
@@ -238,16 +258,30 @@ def calc_pop(tumor_snap, param_stem):
     return pop_tot, pop_stem, pop_reg
 
 
-def create_extension(tumor, n, nc, n_plus):
-    """Extends the tumor matrix Tumor centered at nc with n columns/rows by a factor of nplus rows and columns"""
-    #n_plus=(101-n)//2 #Arbitrary factor by which the domain will grow
-    aux_B=np.zeros((n,n_plus),dtype=int) #Create an auxiliary zero matrix
-    aux_C=np.zeros((n_plus,2*n_plus+n),dtype=int) #Create an extended auxiliary zero matrix
-    n=n+2*n_plus #The tumor matrix size will increase by this factor
-    nc=n//2 #Recalculating the new center
-    tumor = np.concatenate((aux_B,tumor,aux_B),axis=1) #Concatenating empty sides
-    tumor = np.concatenate((aux_C,tumor,aux_C),axis=0) #Concatenating empty matrices 
-    return tumor, n, nc
+INITIAL_SIZE = 50
+EXPANSION_BUFFER = 5  # Expand when within 5 cells of edge
+current_grid_size = INITIAL_SIZE
+original_center = (INITIAL_SIZE//2, INITIAL_SIZE//2)
+
+def create_extension(tumor, oxygen, current_size):
+    """Expand both grids symmetrically"""
+    global original_center  # Access the mutable center position
+    expand_by = EXPANSION_SIZE
+    new_size = current_size + 2 * expand_by
+    
+    # Pad tumor with zeros
+    tumor = np.pad(tumor, [(expand_by, expand_by), (expand_by, expand_by)], 
+                   mode='constant', constant_values=0)
+    
+    # Pad oxygen with background value
+    oxygen = np.pad(oxygen, [(expand_by, expand_by), (expand_by, expand_by)],
+                    mode='constant', constant_values=OXYGEN_SOURCE)
+    
+    # Update original center coordinates
+    original_center[0] += expand_by
+    original_center[1] += expand_by
+    
+    return tumor, oxygen, new_size
 
 def calc_mean(aux_vector):
     """ Return mean and std from an input vector"""
@@ -400,13 +434,63 @@ def see_chances():
     plt.show()
     return fig
 
+# Add this new constant with other parameters
+NUM_BLOOD_VESSELS = 5  # Number of random oxygen sources
+
+def create_initial_oxygen(size):
+    """Create initial oxygen grid with randomly placed blood vessels."""
+    oxygen = np.ones((size, size)) * OXYGEN_SOURCE
+    
+    # Create random blood vessel sources
+    for _ in range(NUM_BLOOD_VESSELS):
+        # Random center coordinates
+        center_x = np.random.randint(0, size)
+        center_y = np.random.randint(0, size)
+        
+        # Set maximum oxygen in circular region around the random center
+        for i in range(size):
+            for j in range(size):
+                if np.sqrt((i-center_x)**2 + (j-center_y)**2) <= BLOOD_VESSEL_RADIUS:
+                    oxygen[i,j] = 1.0  # Maximum oxygen at blood vessel
+                    
+    return oxygen
+
+def calculate_oxygen_diffusion(oxygen, tumor):
+    """Calculate oxygen diffusion using finite differences."""
+    if oxygen.shape != tumor.shape:
+        raise ValueError(f"Oxygen and tumor grids must have the same shape. Oxygen: {oxygen.shape}, Tumor: {tumor.shape}")
+    
+    new_oxygen = np.copy(oxygen)
+    D = OXYGEN_DIFFUSION_RATE
+    γ = OXYGEN_CONSUMPTION_RATE
+    
+    # Finite difference calculation
+    new_oxygen[1:-1, 1:-1] = oxygen[1:-1, 1:-1] + D * (
+        oxygen[2:, 1:-1] + oxygen[:-2, 1:-1] +
+        oxygen[1:-1, 2:] + oxygen[1:-1, :-2] -
+        4*oxygen[1:-1, 1:-1]
+    ) - γ * oxygen[1:-1, 1:-1] * (tumor[1:-1, 1:-1] > 0)
+    
+    # Boundary conditions (zero flux)
+    new_oxygen[0,:] = new_oxygen[1,:]
+    new_oxygen[-1,:] = new_oxygen[-2,:]
+    new_oxygen[:,0] = new_oxygen[:,1]
+    new_oxygen[:,-1] = new_oxygen[:,-2]
+    
+    return np.clip(new_oxygen, 0, 1)
+
 if __name__ == "__main__":
 
+    INITIAL_SIZE = 50
+    current_grid_size = INITIAL_SIZE
+    original_center = [INITIAL_SIZE//2, INITIAL_SIZE//2] 
     grid, tumor_center = create_initial_matrix(INITIAL_SIZE)
+    oxygen = create_initial_oxygen(INITIAL_SIZE)
 
     "System run"
     for k in range (0,sys_nruns): #Loop for system runs
         "System initialization"
+        tumor, tumor_n, tumor_center = create_tumor(param_stem)
         sys_t_start = timer() # Register simulation start time
         t = 0 #Start initial time step
         t_count = 0 #count for printing progress bar
@@ -418,11 +502,12 @@ if __name__ == "__main__":
         "Time loop"
         for t in range(1,t_max+1): #Loop for every time step until t_max
             chance_death, chance_proliferation, chance_migration, chance_stem = vect_deat[t],vect_prol[t],vect_potm[t],vect_stem[t]  #Probabilities inside the loop (i.e.they may change with t)
-            tumor, tumor_rad[t] = main_ca(tumor, tumor_rad[t-1]) #Run the main CA process for the tumor matrix, get updated tumor matrix and radius
-            if tumor_rad[t] >= tumor_center-1:  #If the radius is getting close to the domain border
-                tumor, tumor_n, tumor_center = create_extension(tumor, tumor_n, tumor_center, 5) #Expand
+            current_radius = tumor_rad[t-1]
+            if current_radius > current_grid_size // 2 - EXPANSION_BUFFER:
+                tumor, oxygen, current_grid_size = create_extension(tumor, oxygen, current_grid_size)
             tumor_snapshots[t]=tumor.copy() #Copy tumor matrix at this time instant
-
+            oxygen = calculate_oxygen_diffusion(oxygen, tumor)
+            tumor, tumor_rad[t], oxygen = main_ca(tumor, tumor_rad[t-1], oxygen)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()

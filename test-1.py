@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
 # Constants
+# Constants and Parameters
 CELL_SIZE = 10
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -28,9 +29,10 @@ INITIAL_SIZE = 50
 MAX_SIZE = 400
 EXPANSION_SIZE = 5
 param_cct = 24
-P_MAX = 15
+P_MAX = 10  # Set to 10, 15, or 20 for different scenarios
 param_stem = P_MAX + 1
-param_potm = 1
+param_potm = 10  # Migration potential
+P_A = 0  # Probability of apoptosis (tunable parameter)
 
 # System configuration
 sys_nruns = 3
@@ -42,12 +44,15 @@ sys_report = False
 sys_save = False
 
 # Vectors and matrices
-vect_deat = np.zeros(t_max + 1)
+vect_deat = np.zeros(t_max + 1)  # Apoptosis vector
 vect_prol = np.zeros(t_max + 1)
 vect_potm = np.zeros(t_max + 1)
-vect_stem = np.zeros(t_max + 1)
-vect_deat[:round(0.5 * t_max)] = 0.01 * dt
-vect_deat[round(0.5 * t_max):] = 0.01 * dt
+vect_stem = np.zeros(t_max + 1)  # No symmetrical stem division
+
+# Initialize vectors
+vect_prol[:] = (24 / param_cct * dt)  # Proliferation probability
+vect_potm[:] = param_potm * dt  # Migration probability
+vect_deat[:] = P_A * dt  # Apoptosis probability (tunable)
 vect_prol[:] = (24 / param_cct * dt)
 vect_potm[:round(0.4 * t_max)] = 10 * dt
 vect_potm[round(0.4 * t_max):] = 10 * dt
@@ -137,7 +142,7 @@ class TumorSimulation:
 def create_initial_matrix(size):
     tumor = np.zeros((size, size), dtype=np.int64)
     center = size // 2
-    tumor[center, center] = P_MAX + 1
+    tumor[center, center] = param_stem  # Initialize with a clonogenic stem cell
     return tumor, center
 
 def draw_grid(tumor):
@@ -194,35 +199,35 @@ def calc_free_spots(A, i, j):
 def calc_rad(i, j, radius, nc):
     return max(np.sqrt((nc - i)**2 + (nc - j)**2), radius)
 
-def main_ca(tumor, tumor_rad_new, t_step, tumor_center):  # Add tumor_center as parameter
-    # Keep existing code but use passed tumor_center
+def main_ca(tumor, tumor_rad_new, t_step, tumor_center):
     cord, order = order_sweep(tumor)
     tumor_death, tumor_prolif, tumor_migr = calc_chance(cord, order)
     
-    # Rest of the function remains the same
     for n in order:
         i, j = cord[n]
         cell = tumor[i][j]
         if cell == 0: continue
         
+        # Check for apoptosis
         if cell < param_stem and tumor_death[n] <= vect_deat[t_step]:
-            tumor[i][j] = 0
+            tumor[i][j] = 0  # Cell dies
             continue
             
+        # Check for proliferation or migration
         if tumor_prolif[n] <= vect_prol[t_step] or tumor_migr[n] <= vect_potm[t_step]:
             spots = calc_free_spots(tumor, i, j)
             if spots[0] == 0:
                 ni, nj = i + spots[1], j + spots[2]
                 if tumor_prolif[n] <= vect_prol[t_step]:
                     if cell == param_stem:
-                        tumor[ni][nj] = param_stem if random.random() <= vect_stem[t_step] else P_MAX
+                        tumor[ni][nj] = P_MAX  # Clonogenic stem cell produces RTCs
                     else:
                         tumor[i][j] -= 1
                         tumor[ni][nj] = tumor[i][j]
                 else:
                     tumor[ni][nj] = cell
                     tumor[i][j] = 0
-                tumor_rad_new = calc_rad(ni, nj, tumor_rad_new, tumor_center)  # Now uses passed center
+                tumor_rad_new = calc_rad(ni, nj, tumor_rad_new, tumor_center)
     
     return tumor, tumor_rad_new
 
